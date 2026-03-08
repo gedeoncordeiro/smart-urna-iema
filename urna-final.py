@@ -63,7 +63,7 @@ class UrnaEletronicaChapa:
     
     def carregar_alunos_do_arquivo(self):
         """Carrega os alunos do arquivo Excel LISTA_ALUNOS_MATRICULA.xlsx"""
-        if not os.path.exists(self.arquivo_alunos):
+        if not self.arquivo_alunos.exists():
             messagebox.showwarning("Aviso", 
                                  f"Arquivo {self.arquivo_alunos} não encontrado!\n"
                                  "A votação não poderá ser realizada sem a lista de alunos.")

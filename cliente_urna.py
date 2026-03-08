@@ -555,13 +555,26 @@ class ClienteUrna:
             return texto[:tamanho_maximo] + "..."
         return texto
     
-    def registrar_voto(self, chapa):
-        """Registra voto em uma chapa"""
-        if not messagebox.askyesno("Confirmar Voto", 
-                                  f"Confirmar voto na CHAPA {chapa['numero']}?\n\n"
-                                  f"Candidato: {chapa['candidato']}\n"
-                                  f"Vice: {chapa['vice']}"):
-            return
+    def registrar_voto(self, hash_aluno, numero_chapa):
+        with self.lock_voto:  # protege concorrência
+
+            if hash_aluno in self.votos:
+                return {"status": "erro", "mensagem": "Aluno já votou"}
+
+            if numero_chapa not in self.chapas:
+                return {"status": "erro", "mensagem": "Chapa inválida"}
+
+            # registra voto
+            self.votos[hash_aluno] = numero_chapa
+            self.chapas[numero_chapa].votos += 1
+
+            # salvar imediatamente
+            self.salvar_dados()
+
+            # registrar log
+            logging.info(f"Voto registrado | aluno_hash={hash_aluno} | chapa={numero_chapa}")
+
+            return {"status": "ok"}
         
         comando = {
             'tipo': 'REGISTRAR_VOTO',

@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import matplotlib.pyplot as plt
 import json
 import hashlib
 import socket
@@ -7,6 +8,7 @@ import threading
 import pickle
 import struct
 from datetime import datetime, time
+from pathlib import Path
 import os
 import pandas as pd
 from PIL import Image, ImageTk
@@ -21,8 +23,54 @@ from reportlab.lib.units import mm, cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import io
+import logging
 import shutil
+import logging
 from pathlib import Path
+from threading import Lock
+import subprocess
+import sys
+import importlib.metadata
+
+def verificar_dependencias():
+
+    print("🔎 Verificando dependências...")
+
+    try:
+        with open("requirements.txt") as f:
+            dependencias = [
+                linha.strip()
+                for linha in f
+                if linha.strip() and not linha.strip().startswith("#")
+            ]
+    except FileNotFoundError:
+        print("⚠ requirements.txt não encontrado.")
+        return
+
+    instaladas = {dist.metadata["Name"].lower() for dist in importlib.metadata.distributions()}
+
+    faltando = []
+
+    for pacote in dependencias:
+        nome = pacote.split("==")[0].lower()
+        if nome not in instaladas:
+            faltando.append(pacote)
+
+    if not faltando:
+        print("✅ Todas as dependências já estão instaladas.\n")
+        return
+
+    print("📦 Instalando dependências faltantes...")
+
+    for pacote in faltando:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pacote])
+
+    print("✅ Dependências instaladas com sucesso.\n")
+
+verificar_dependencias()
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
 
 class Chapa:
     def __init__(self, numero: str, nome: str, candidato: str, vice: str, turma: str, foto_candidato: str = "", foto_vice: str = ""):
@@ -49,19 +97,43 @@ class Aluno:
 
 class ServidorUrna:
     def __init__(self):
+
+        self.lock_voto = Lock()
+        self.lock_voto = threading.Lock()
+
+        # Configuração de logs
+        Path("logs").mkdir(exist_ok=True)
+
+        logging.basicConfig(
+            filename="logs/eleicao.log",
+            level=logging.INFO,
+            format="%(asctime)s - %(message)s"
+        )
+    def __init__(self):
         self.chapas: Dict[str, Chapa] = {}
         self.alunos: Dict[str, Aluno] = {}
         self.alunos_por_turma: Dict[str, List[str]] = {}
         self.votos = {}
+        self.lock_voto = threading.Lock()
         self.horario_inicio = None
         self.horario_fim = None
-        self.arquivo_dados = "dados_urna_servidor.json"
-        self.arquivo_alunos = "LISTA_ALUNOS_MATRICULA.xlsx"
-        self.pasta_fotos = "fotos_chapas"
+        BASE_DIR = Path(__file__).resolve().parent
+        self.arquivo_dados = BASE_DIR / "dados_urna_servidor.json"
+        self.arquivo_alunos = BASE_DIR / "LISTA_ALUNOS_MATRICULA.xlsx"
+        self.pasta_fotos = BASE_DIR / "fotos_chapas"
+        
+        # Configurar logs
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+
+        logging.basicConfig(
+            filename="logs/eleicao.log",
+            level=logging.INFO,
+            format="%(asctime)s - %(message)s"
+        )
         
         # Criar pasta de fotos se não existir
-        if not os.path.exists(self.pasta_fotos):
-            os.makedirs(self.pasta_fotos)
+        self.pasta_fotos.mkdir(exist_ok=True)
         
         # Configurações de rede
         self.host = '0.0.0.0'
@@ -105,8 +177,9 @@ class ServidorUrna:
             return caminho_original
     
     def carregar_alunos_do_arquivo(self):
+        #Verificar se o arquivo existe
         """Carrega os alunos do arquivo Excel"""
-        if not os.path.exists(self.arquivo_alunos):
+        if not self.arquivo_alunos.exists():
             messagebox.showwarning("Aviso", f"Arquivo {self.arquivo_alunos} não encontrado!")
             return
         
@@ -283,16 +356,19 @@ class ServidorUrna:
                 if not aluno or aluno.votou:
                     resposta = {'status': 'erro', 'mensagem': 'Aluno inválido ou já votou!'}
                 else:
-                    if chapa_numero == 'branco':
-                        self.votos['branco'] = self.votos.get('branco', 0) + 1
-                    else:
-                        chapa = self.chapas.get(chapa_numero)
-                        if chapa:
-                            chapa.votos += 1
-                            self.votos[chapa_numero] = self.votos.get(chapa_numero, 0) + 1
+                    with self.lock_voto:
+
+                        if chapa_numero == 'branco':
+                            self.votos['branco'] = self.votos.get('branco', 0) + 1
+                        else:
+                            chapa = self.chapas.get(chapa_numero)
+                            if chapa:
+                                chapa.votos += 1
+                                self.votos[chapa_numero] = self.votos.get(chapa_numero, 0) + 1
                     
                     aluno.votou = True
                     aluno.data_voto = datetime.now()
+                    logging.info(f"Voto registrado | aluno={aluno.hash_id} | chapa={chapa_numero}")
                     self.salvar_dados()
                     
                     resposta = {'status': 'ok', 'mensagem': 'Voto registrado com sucesso!'}
@@ -607,8 +683,12 @@ class ServidorUrna:
                  font=('Arial', 11)).grid(row=0, column=0, padx=20, pady=5)
         ttk.Label(stats_grid, text=f"Já votaram: {votaram}", 
                  font=('Arial', 11)).grid(row=0, column=1, padx=20, pady=5)
-        ttk.Label(stats_grid, text=f"Abstenção: {total_alunos - votaram} ({((total_alunos - votaram)/total_alunos*100):.1f}%)", 
-                 font=('Arial', 11)).grid(row=0, column=2, padx=20, pady=5)
+        abstencao = total_alunos - votaram
+        porcentagem_abst = (abstencao / total_alunos * 100) if total_alunos > 0 else 0
+
+        ttk.Label(stats_grid,
+            text=f"Abstenção: {abstencao} ({porcentagem_abst:.1f}%)",
+            font=('Arial', 11)).grid(row=0, column=2, padx=20, pady=5)
         
         ttk.Label(stats_grid, text=f"Total de votos: {total_votos}", 
                  font=('Arial', 11)).grid(row=1, column=0, padx=20, pady=5)
@@ -1192,7 +1272,7 @@ class ServidorUrna:
                            if turma_filtro is None or c.turma == turma_filtro]
         
         for chapa in chapas_filtradas:
-            percentual = (chapa.votos / total_votos) * 100
+            percentual = (chapa.votos / total_votos * 100) if total_votos > 0 else 0
             tree.insert('', tk.END, values=(
                 f"{chapa.numero} - {chapa.nome}",
                 chapa.candidato,
@@ -1205,7 +1285,7 @@ class ServidorUrna:
         if turma_filtro is None:
             votos_branco = self.votos.get('branco', 0)
             if votos_branco > 0:
-                percentual = (votos_branco / total_votos) * 100
+                percentual = (votos_branco / total_votos * 100) if total_votos > 0 else 0
                 tree.insert('', tk.END, values=(
                     'VOTOS EM BRANCO',
                     '-',
@@ -1357,7 +1437,7 @@ class ServidorUrna:
                     ["Total de alunos aptos", str(total_alunos)],
                     ["Total de votos", str(total_votos)],
                     ["Comparecimento", f"{votaram} ({((votaram/total_alunos)*100):.1f}%)"],
-                    ["Abstenção", f"{total_alunos - votaram} ({((total_alunos - votaram)/total_alunos*100):.1f}%)"]
+                    ["Abstenção", f"{total_alunos - votaram} ({((total_alunos - votaram)/total_alunos*100 if total_alunos>0 else 0):.1f}%)"]
                 ]
                 
                 table = Table(data, colWidths=[200, 100])
@@ -1393,7 +1473,7 @@ class ServidorUrna:
             
             votos_branco = self.votos.get('branco', 0)
             if votos_branco > 0:
-                percentual = (votos_branco / total_votos) * 100
+                percentual = (votos_branco / total_votos * 100) if total_votos > 0 else 0
                 data.append(["VOTOS EM BRANCO", "-", "-", str(votos_branco), f"{percentual:.1f}%"])
             
             table = Table(data, colWidths=[100, 120, 120, 60, 60])
@@ -1483,7 +1563,9 @@ class ServidorUrna:
                 
                 # Calcular porcentagens
                 total_votos = df_geral['Votos'].sum()
-                df_geral['Porcentagem'] = df_geral['Votos'].apply(lambda x: f"{(x/total_votos*100):.1f}%")
+                df_geral['Porcentagem'] = df_geral['Votos'].apply(
+                    lambda x: f"{(x/total_votos*100):.1f}%" if total_votos > 0 else "0.0%"
+                )
                 
                 df_geral.to_excel(writer, sheet_name='Resultado Geral', index=False)
                 
@@ -1505,9 +1587,9 @@ class ServidorUrna:
                             total_alunos,
                             total_votos,
                             votaram,
-                            f"{(votaram/total_alunos*100):.1f}%",
+                            f"{(votaram/total_alunos*100 if total_alunos>0 else 0):.1f}%",
                             total_alunos - votaram,
-                            f"{((total_alunos - votaram)/total_alunos*100):.1f}%"
+                            f"{((total_alunos - votaram)/total_alunos*100 if total_alunos>0 else 0):.1f}%"
                         ]
                     })
                     
@@ -1558,8 +1640,11 @@ class ServidorUrna:
                     
                     f.write(f"Total de alunos aptos: {total_alunos}\n")
                     f.write(f"Total de votos: {total_votos}\n")
-                    f.write(f"Comparecimento: {votaram} ({(votaram/total_alunos*100):.1f}%)\n")
-                    f.write(f"Abstenção: {total_alunos - votaram} ({((total_alunos - votaram)/total_alunos*100):.1f}%)\n\n")
+                    comparecimento = (votaram/total_alunos*100) if total_alunos > 0 else 0
+                    abstencao = ((total_alunos - votaram) / total_alunos * 100) if total_alunos > 0 else 0
+
+                    f.write(f"Comparecimento: {votaram} ({comparecimento:.1f}%)\n")
+                    f.write(f"Abstenção: {total_alunos - votaram} ({abstencao:.1f}%)\n\n")
                 
                 f.write("RESULTADO GERAL\n")
                 f.write("-" * 80 + "\n")
@@ -1567,13 +1652,13 @@ class ServidorUrna:
                 f.write("-" * 80 + "\n")
                 
                 for chapa in self.chapas.values():
-                    percentual = (chapa.votos / total_votos) * 100
+                    percentual = (chapa.votos / total_votos * 100) if total_votos > 0 else 0
                     f.write(f"{chapa.numero + ' - ' + chapa.nome:<20} {chapa.candidato:<20} "
                            f"{chapa.vice:<20} {chapa.votos:<8} {percentual:.1f}%\n")
                 
                 votos_branco = self.votos.get('branco', 0)
                 if votos_branco > 0:
-                    percentual = (votos_branco / total_votos) * 100
+                    percentual = (votos_branco / total_votos * 100) if total_votos > 0 else 0
                     f.write(f"{'VOTOS EM BRANCO':<20} {'-':<20} {'-':<20} "
                            f"{votos_branco:<8} {percentual:.1f}%\n")
                 
